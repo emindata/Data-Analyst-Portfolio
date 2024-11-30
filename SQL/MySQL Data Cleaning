@@ -1,1 +1,228 @@
+# creating database
 
+create database linkedin_jobs;
+use linkedin_jobs;
+
+
+# creating the tables (imported them via command line)
+
+create table postings (
+	job_id bigint,
+	company_name varchar(255),
+	title varchar(255),
+	description varchar(255),
+	max_salary float,
+	pay_period varchar(255),
+	location varchar(255),
+	company_id bigint,
+	views int,
+	med_salary float,
+	min_salary float,
+	formatted_work_type varchar(255),
+	applies int,
+  original_listed_time varchar(255), 
+	remote_allowed int,
+	job_posting_url varchar(255),
+	application_url varchar(255),
+	application_type varchar(255),
+	expiry varchar(255),
+	closed_time varchar(255),
+	formatted_experience_level varchar(255),
+	skills_desc varchar(255),
+	listed_time varchar(255),
+	posting_domain varchar(255),
+	sponsored int,
+	work_type varchar(255),
+	currency varchar(255),
+	compensation_type varchar(255),
+	normalized_salary float,
+	zip_code int,
+	fips int
+);
+
+
+create table company_industries (
+company_id bigint,
+industry varchar(255)
+);
+
+--
+
+# creating backup of both tables
+
+create table postings_staging like postings;
+insert into postings_staging select * from postings;
+
+create table company_industries_staging like company_industries;
+insert into company_industries_staging select * from company_industries;
+
+--
+
+# deleting unnecesary columns and rows
+
+select * from postings_staging;
+
+start transaction; 
+alter table postings_staging
+	drop column expiry,
+	drop column closed_time,
+	drop column posting_domain,
+	drop column sponsored;
+commit;
+
+delete 
+from postings_staging where pay_period = '4.0';
+    
+--
+
+# standardazing data 
+
+# trimming
+update postings_staging
+set title = trim(title),
+    company_name = trim(company_name);
+
+# some rows in zip_code column have the value of 0 (invalid zip_code)
+# I set such values to null, as visualisation tools might interpret 0 as valid data, 
+# potentially skewing results
+update postings_staging
+set zip_code = null
+where zip_code = 0;
+
+
+--
+
+# modifying the order of columns for easier navigation 
+
+alter table postings_staging 
+modify pay_period varchar(255) after title,
+modify	min_salary float after pay_period,
+modify med_salary float after max_salary,
+modify normalized_salary float after med_salary;
+
+-- 
+
+# apart from USD, there are other currencies in which salary data is given
+# equalizing all currencies to USD to ease the upcoming visualisation process
+
+select * from postings_staging
+where currency != 'USD' and currency != '';
+
+
+# EURO to USD
+start transaction;
+update postings_staging
+set min_salary = round(min_salary / 1.05),
+    max_salary = round(max_salary / 1.05),
+    normalized_salary = round(normalized_salary  / 1.05),
+    currency = 'USD'
+where currency = 'EUR';
+
+
+# Australian Dollar to USD
+update postings_staging
+set min_salary = round(min_salary / 0.65),
+    max_salary = round(max_salary / 0.65),
+    normalized_salary = round(normalized_salary / 0.65),
+    currency = 'USD'
+where currency = 'AUD';
+commit;
+
+
+--
+
+
+# removing dublicates
+
+# creating a new table by adding row_num column to the existing table
+# selecting everything from the old table and inserting into the new table, and then population row_num column
+# using row_number() window function and numbering the rows by given partitions, populating row_num column with this
+# now, all rows have row number of 1 except for those having dublicates
+# selecting dublicates (row_num > 1) and deleting them
+# after the dublicates are deleted, dropping the row_num column as it is no longer needed
+
+
+CREATE TABLE `postings_staging2` (
+  `job_id` bigint DEFAULT NULL,
+  `company_name` varchar(255) DEFAULT NULL,
+  `title` varchar(255) DEFAULT NULL,
+  `pay_period` varchar(255) DEFAULT NULL,
+  `min_salary` float DEFAULT NULL,
+  `max_salary` float DEFAULT NULL,
+  `normalized_salary` float DEFAULT NULL,
+  `location` varchar(255) DEFAULT NULL,
+  `company_id` bigint DEFAULT NULL,
+  `views` int DEFAULT NULL,
+  `formatted_work_type` varchar(255) DEFAULT NULL,
+  `applies` int DEFAULT NULL,
+  `formatted_experience_level` varchar(255) DEFAULT NULL,
+  `work_type` varchar(255) DEFAULT NULL,
+  `currency` varchar(255) DEFAULT NULL,
+  `zip_code` int DEFAULT NULL,
+  `row_num` int
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+insert into postings_staging2
+select *, row_number() over(partition by company_name, title, pay_period, min_salary, 
+max_salary, location, company_id, views, formatted_work_type, applies, work_type, zip_code) as row_num
+from postings_staging;
+
+start transaction;
+delete from postings_staging2
+where row_num > 1;
+commit;
+
+alter table postings_staging2
+drop column row_num;
+
+
+--
+
+
+# joining postings_staging and company_industries_staging tables
+
+select 
+	job_id,
+	company_name,
+	title,
+	pay_period, 
+	min_salary,  
+	max_salary, 
+	normalized_salary, 
+	location,
+	ps.company_id as ps_company_id,
+	views, 
+	formatted_work_type, 
+	applies,  
+	formatted_experience_level, 
+	work_type, 
+	currency,
+	zip_code,
+  cis.company_id as cis_company_id,
+  cis.industry
+from postings_staging2 ps
+left join company_industries_staging cis
+on ps.company_id = cis.company_id
+order by ps.company_id asc;
+
+
+--
+
+# correcting invalid data
+
+# some rows of min, max and normalized salary contain invalid data such as the yearly salary of 120,000,000$
+# using urls of the job postings I viewed such postings in Linkedin and deleted them, 
+# after ensuring that they aren't valid
+
+# when min_salary is over 250 where pay_period is hourly, 
+# this outputs normalized salary as tens of millions of dollars
+start transaction;
+delete from postings_staging2
+where pay_period = 'HOURLY' and min_salary > 250;
+
+# same issue 
+delete from final_linkedin
+where pay_period = 'BIWEEKLY' and min_salary > 2245;
+commit;
+
+select * from postings_staging2;
